@@ -1,0 +1,5 @@
+haystack-ai
+weaviate-haystack
+anthropic-haystack
+pypdf
+sentence-transformers
