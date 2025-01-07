@@ -5,90 +5,106 @@ from haystack import Pipeline
 from haystack.components.builders import PromptBuilder
 from haystack.components.converters import PyPDFToDocument
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder, SentenceTransformersTextEmbedder
-from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
+from haystack.components.joiners import DocumentJoiner
+from haystack.components.preprocessors import DocumentCleaner
+from haystack.components.rankers import TransformersSimilarityRanker
 from haystack.components.writers import DocumentWriter
 from haystack.utils import Secret
 from haystack_integrations.components.generators.anthropic import AnthropicGenerator
 from haystack_integrations.components.retrievers.weaviate import WeaviateEmbeddingRetriever, WeaviateBM25Retriever
 from haystack_integrations.document_stores.weaviate import WeaviateDocumentStore, AuthApiKey
-from haystack.components.joiners import DocumentJoiner
-from haystack.components.rankers import TransformersSimilarityRanker
 
-weaviate_api_key = os.environ["WEAVIATE_API_KEY"]
-auth_client_secret = AuthApiKey()
-weaviate_url = os.environ["WEAVIATE_URL"]
+from legal_doc_splitter import LegalDocumentSplitter
 
-document_store = WeaviateDocumentStore(url=weaviate_url, auth_client_secret=auth_client_secret)
-# load embedding model
-doc_embedder = SentenceTransformersDocumentEmbedder(model="sentence-transformers/all-MiniLM-L6-v2")
-doc_embedder.warm_up()
 
-# TODO best cleaning/splitting strategies? bigger chunks? change embedding model?
-pipeline = Pipeline()
-pipeline.add_component("converter", PyPDFToDocument())
-pipeline.add_component("cleaner", DocumentCleaner())
-# splitting docs into single paragraphs
-pipeline.add_component("splitter", DocumentSplitter(split_by="passage", split_length=1))
-pipeline.add_component("doc_embedder", doc_embedder)
-pipeline.add_component("writer", DocumentWriter(document_store=document_store))
+class LegalQA:
+    """Answer questions using context from German legal code"""
 
-pipeline.connect("converter", "cleaner")
-pipeline.connect("cleaner", "splitter")
-pipeline.connect("splitter", "doc_embedder")
-pipeline.connect("doc_embedder", "writer")
+    def __init__(self):
+        self.weaviate_api_key = os.environ["WEAVIATE_API_KEY"]
+        self.auth_client_secret = AuthApiKey()
+        self.weaviate_url = os.environ["WEAVIATE_URL"]
+        self.document_store = WeaviateDocumentStore(url=self.weaviate_url, auth_client_secret=self.auth_client_secret)
+        self.embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+        self.ranking_model = "BAAI/bge-reranker-base"
+        self.prompt_template = """
+                        Beantworte die Frage unter Berücksichtigung der Gesetzesgrundlage im folgenden Kontext.
+                        Beachte dabei, die Nummern der Paragraphen zu nennen.
 
-data_dir = "./data"
-pipeline.run({"converter": {"sources": list(Path(data_dir).glob("**/*"))}})
+                        Context:
+                        {% for document in documents %}
+                        [§{{document.meta.paragraph_number}}] {{ document.content }}
+                        {% endfor %}
+                        
+                        Frage: {{question}}
+                        Antwort:
+                        """
 
-# embed user queries
-text_embedder = SentenceTransformersTextEmbedder(model="sentence-transformers/all-MiniLM-L6-v2")
-# initialize components for hybrid retrieval
-embedding_retriever = WeaviateEmbeddingRetriever(document_store=document_store, top_k=3)
-keyword_retriever = WeaviateBM25Retriever(document_store=document_store, top_k=3)
-document_joiner = DocumentJoiner()
-ranker = TransformersSimilarityRanker(model="BAAI/bge-reranker-base")
+    def create_doc_indexing_pipeline(self):
+        custom_splitter = LegalDocumentSplitter()
+        doc_embedder = SentenceTransformersDocumentEmbedder(model=self.embedding_model)
+        doc_embedder.warm_up()
 
-# set prompt template
-# TODO optimize?
-template = """
-Beantworte die Frage anhand der im Kontext gegebenen Gesetzesgrundlage.
+        index_pipeline = Pipeline()
+        index_pipeline.add_component("converter", PyPDFToDocument())
+        index_pipeline.add_component("cleaner", DocumentCleaner())
+        index_pipeline.add_component("splitter", custom_splitter)
+        index_pipeline.add_component("doc_embedder", doc_embedder)
+        index_pipeline.add_component("writer", DocumentWriter(document_store=self.document_store))
 
-Kontext:
-{% for document in documents %}
-    {{ document.content }}
-{% endfor %}
+        index_pipeline.connect("converter", "cleaner")
+        index_pipeline.connect("cleaner", "splitter")
+        index_pipeline.connect("splitter", "doc_embedder")
+        index_pipeline.connect("doc_embedder", "writer")
+        return index_pipeline
 
-Frage: {{question}}
-Antwort:
-"""
+    def create_query_pipeline(self):
+        # embed user queries
+        text_embedder = SentenceTransformersTextEmbedder(model=self.embedding_model)
+        # initialize components for hybrid retrieval
+        embedding_retriever = WeaviateEmbeddingRetriever(document_store=self.document_store, top_k=2)
+        keyword_retriever = WeaviateBM25Retriever(document_store=self.document_store, top_k=2)
+        document_joiner = DocumentJoiner()
+        ranker = TransformersSimilarityRanker(model=self.ranking_model)
 
-# define RAG pipeline
-query_pipeline = Pipeline()
-query_pipeline.add_component("text_embedder", text_embedder)
-query_pipeline.add_component("embedding_retriever", embedding_retriever)
-query_pipeline.add_component("keyword_retriever", keyword_retriever)
-query_pipeline.add_component("document_joiner", document_joiner)
-query_pipeline.add_component("ranker", ranker)
-query_pipeline.add_component("prompt_builder", PromptBuilder(template=template))
-query_pipeline.add_component("llm", AnthropicGenerator(Secret.from_env_var("ANTHROPIC_API_KEY")))
+        # define pipeline components
+        query_pipeline = Pipeline()
+        query_pipeline.add_component("text_embedder", text_embedder)
+        query_pipeline.add_component("embedding_retriever", embedding_retriever)
+        query_pipeline.add_component("keyword_retriever", keyword_retriever)
+        query_pipeline.add_component("document_joiner", document_joiner)
+        query_pipeline.add_component("ranker", ranker)
+        query_pipeline.add_component("prompt_builder", PromptBuilder(template=self.prompt_template))
+        query_pipeline.add_component("llm", AnthropicGenerator(Secret.from_env_var("ANTHROPIC_API_KEY")))
 
-query_pipeline.connect("text_embedder.embedding", "embedding_retriever.query_embedding")
-query_pipeline.connect("embedding_retriever", "document_joiner")
-query_pipeline.connect("keyword_retriever", "document_joiner")
-query_pipeline.connect("document_joiner", "ranker")
-# TODO richtig?
-query_pipeline.connect("ranker", "prompt_builder.documents")
-query_pipeline.connect("prompt_builder", "llm")
+        # connect pipeline components
+        query_pipeline.connect("text_embedder.embedding", "embedding_retriever.query_embedding")
+        query_pipeline.connect("embedding_retriever", "document_joiner")
+        query_pipeline.connect("keyword_retriever", "document_joiner")
+        query_pipeline.connect("document_joiner", "ranker")
+        query_pipeline.connect("ranker", "prompt_builder.documents")
+        query_pipeline.connect("prompt_builder", "llm")
+        return query_pipeline
 
-# ask questions
-questions = [
-    "Wie hoch ist die Grundzulage?",
-    "Wie werden Versorgungsleistungen aus einer Direktzusage oder einer Unterstützungskasse steuerlich behandelt?",
-    "Wie werden Leistungen aus einer Direktversicherung, Pensionskasse oder einem Pensionsfonds in der "
-    "Auszahlungsphase besteuert?"
-]
 
-for question in questions:
-    response = query_pipeline.run({"text_embedder": {"text": question}, "keyword_retriever": {"query": question},
+if __name__ == "__main__":
+    # index documents and write to vector db
+    legalQA = LegalQA()
+    data_dir = "./data"
+    index_pipe = legalQA.create_doc_indexing_pipeline()
+    index_pipe.run({"converter": {"sources": list(Path(data_dir).glob("**/*"))}})
+
+    # define questions to be answered
+    questions = [
+        "Wie hoch ist die Grundzulage?",
+        "Wie werden Versorgungsleistungen aus einer Direktzusage oder einer Unterstützungskasse steuerlich behandelt?",
+        "Wie werden Leistungen aus einer Direktversicherung, Pensionskasse oder einem Pensionsfonds in der "
+        "Auszahlungsphase besteuert?"
+    ]
+
+    # generate answers to questions using query pipeline
+    query_pipe = legalQA.create_query_pipeline()
+    for question in questions:
+        response = query_pipe.run({"text_embedder": {"text": question}, "keyword_retriever": {"query": question},
                                    "ranker": {"query": question}, "prompt_builder": {"question": question}})
-    print(response["llm"]["replies"][0])
+        print(response["llm"]["replies"][0])
