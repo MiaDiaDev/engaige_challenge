@@ -3,3 +3,4 @@ weaviate-haystack
 anthropic-haystack
 pypdf
 sentence-transformers
+accelerate
