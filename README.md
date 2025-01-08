@@ -3,6 +3,8 @@ Bitte die requirements.txt installieren und valide Keys in der .env hinterlegen.
 
 Verbesserungsmöglichkeiten und Ausblick:
 
+Querverweise wie z.B. "21 bis 25 zu beachten" berücksichtigen
+
 Extractive QA: Wörtliche Wiedergabe (Zitieren) von Textpassagen könnte besser zu Gesetzestexten passen. Falls Infos an mehreren Stellen in den Dokumenten stehen, scheint trotzdem ein Zusammenfassungsschritt unter Verwendung eines LLMs nötig. Hier besteht somit wieder die Gefahr von Missinterpretation, Missachtung/Fehlen von Kontext oder Halluzinationen.
 
 Hierarchisches Splitting: Baumstruktur nutzen um Zuordnung von Abschnitten zu Paragraphen verdeutlichen (Wichtigkeit abhängig von Art der Anfrage) -> bessere Metadaten https://docs.haystack.deepset.ai/reference/experimental-splitters-api 

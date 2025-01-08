@@ -10,7 +10,6 @@ class LegalDocumentSplitter(DocumentSplitter):
 
     def _create_doc(self, content: str, main_section: str, subsection: str,
                     para_num: str, original_doc: Document) -> Document:
-        """Creates a new document for a section with metadata"""
         meta = {
             "main_section": main_section,
             "subsection": subsection,

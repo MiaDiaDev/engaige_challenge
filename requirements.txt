@@ -1,6 +1,7 @@
 haystack-ai
 weaviate-haystack
 anthropic-haystack
+ragas-haystack
 pypdf
 sentence-transformers
 accelerate
