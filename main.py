@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import List
 
 from haystack import Pipeline
 from haystack.components.builders import PromptBuilder
@@ -10,11 +11,14 @@ from haystack.components.preprocessors import DocumentCleaner
 from haystack.components.rankers import TransformersSimilarityRanker
 from haystack.components.writers import DocumentWriter
 from haystack.utils import Secret
+from haystack_integrations.components.evaluators.ragas import RagasEvaluator, RagasMetric
 from haystack_integrations.components.generators.anthropic import AnthropicGenerator
 from haystack_integrations.components.retrievers.weaviate import WeaviateEmbeddingRetriever, WeaviateBM25Retriever
 from haystack_integrations.document_stores.weaviate import WeaviateDocumentStore, AuthApiKey
 
 from legal_doc_splitter import LegalDocumentSplitter
+
+os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY")
 
 
 class LegalQA:
@@ -75,7 +79,7 @@ class LegalQA:
         query_pipeline.add_component("document_joiner", document_joiner)
         query_pipeline.add_component("ranker", ranker)
         query_pipeline.add_component("prompt_builder", PromptBuilder(template=self.prompt_template))
-        query_pipeline.add_component("llm", AnthropicGenerator(Secret.from_env_var("ANTHROPIC_API_KEY")))
+        query_pipeline.add_component("llm", AnthropicGenerator(api_key=Secret.from_env_var("ANTHROPIC_API_KEY")))
 
         # connect pipeline components
         query_pipeline.connect("text_embedder.embedding", "embedding_retriever.query_embedding")
@@ -85,6 +89,20 @@ class LegalQA:
         query_pipeline.connect("ranker", "prompt_builder.documents")
         query_pipeline.connect("prompt_builder", "llm")
         return query_pipeline
+
+    def evaluate_answers(self, questions: List[str], contexts: List[list], answers: List[str]):
+        eval_pipeline = Pipeline()
+        evaluator_context_util = RagasEvaluator(metric=RagasMetric.CONTEXT_UTILIZATION)
+        evaluator_faith = RagasEvaluator(metric=RagasMetric.FAITHFULNESS)
+
+        eval_pipeline.add_component("evaluator_context_util", evaluator_context_util)
+        eval_pipeline.add_component("evaluator_faithfulness", evaluator_faith)
+
+        result = eval_pipeline.run({"evaluator_context_util": {"questions": questions, "contexts": contexts,
+                                                               "responses": answers},
+                                    "evaluator_faithfulness": {"questions": questions,
+                                                               "contexts": contexts, "responses": answers}})
+        return result
 
 
 if __name__ == "__main__":
@@ -102,9 +120,22 @@ if __name__ == "__main__":
         "Auszahlungsphase besteuert?"
     ]
 
-    # generate answers to questions using query pipeline
+    # generate answers to questions using query pipeline, save contexts for evaluation
     query_pipe = legalQA.create_query_pipeline()
+    contexts, answers = [], []
     for question in questions:
+        context_per_question = []
         response = query_pipe.run({"text_embedder": {"text": question}, "keyword_retriever": {"query": question},
-                                   "ranker": {"query": question}, "prompt_builder": {"question": question}})
+                                   "ranker": {"query": question}, "prompt_builder": {"question": question}},
+                                  include_outputs_from={"ranker"})
         print(response["llm"]["replies"][0])
+        answers.append(response["llm"]["replies"][0])
+
+        for doc in response["ranker"]["documents"]:
+            context_per_question.append(doc.content)
+        contexts.append(context_per_question)
+
+    # evaluate faithfulness of generated answers
+    eval_results = legalQA.evaluate_answers(questions=questions, contexts=contexts, answers=answers)
+    print(eval_results["evaluator_context_util"]["results"])
+    print(eval_results["evaluator_faithfulness"]["results"])
